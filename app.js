@@ -276,13 +276,27 @@
       let inner = "";
       for (const ex of exOrder) {
         inner += `<div class="ex-name">${esc(ex)}</div>`;
-        for (const s of byEx.get(ex).sort((a, b) => a.setNo - b.setNo)) {
-          inner += `<div class="set-line" data-set="${s.id}">
-            <span class="no">${s.setNo}</span>
-            <span class="wr"><b>${fmtNum(s.weight)}</b> кг × <b>${s.reps}</b>${flags.has(s.id) ? ' <span class="pr">🏆</span>' : ""}
-              ${s.notes ? `<span class="note">${esc(s.notes)}</span>` : ""}</span>
-            <span class="vol">${fmtNum(volume(s.weight, s.reps))} кг<br>1ПМ ${fmtNum(oneRM(s.weight, s.reps))}</span>
-            <button class="del" data-del="${s.id}">✕</button>
+        const list = byEx.get(ex).sort((a, b) => a.setNo - b.setNo);
+        // collapse consecutive sets with identical weight × reps into one row
+        const runs = [];
+        for (const s of list) {
+          const prev = runs[runs.length - 1];
+          if (prev && prev.weight === s.weight && prev.reps === s.reps) prev.items.push(s);
+          else runs.push({ weight: s.weight, reps: s.reps, items: [s] });
+        }
+        for (const run of runs) {
+          const n = run.items.length;
+          const isPR = run.items.some((s) => flags.has(s.id));
+          const notes = [...new Set(run.items.map((s) => s.notes).filter(Boolean))].join("; ");
+          const totalVol = run.weight * run.reps * n;
+          const lastId = run.items[n - 1].id;                 // tapping ✕ peels the last set
+          const badge = n > 1 ? `${n}×` : String(run.items[0].setNo);
+          inner += `<div class="set-line" data-set="${lastId}">
+            <span class="no">${badge}</span>
+            <span class="wr"><b>${fmtNum(run.weight)}</b> кг × <b>${run.reps}</b>${isPR ? ' <span class="pr">🏆</span>' : ""}
+              ${notes ? `<span class="note">${esc(notes)}</span>` : ""}</span>
+            <span class="vol">${fmtNum(totalVol)} кг<br>1ПМ ${fmtNum(oneRM(run.weight, run.reps))}</span>
+            <button class="del" data-del="${lastId}" data-count="${n}">✕</button>
           </div>`;
         }
       }
@@ -294,8 +308,11 @@
     }
     box.innerHTML = html;
     box.querySelectorAll("[data-del]").forEach((b) =>
-      b.addEventListener("click", () =>
-        confirmThen("Удалить этот подход?", () => { Store.deleteSet(b.dataset.del); haptic("ok"); renderLog(); })));
+      b.addEventListener("click", () => {
+        const cnt = parseInt(b.dataset.count || "1", 10);
+        if (cnt > 1) { Store.deleteSet(b.dataset.del); haptic("ok"); renderLog(); } // peel one from the group
+        else confirmThen("Удалить этот подход?", () => { Store.deleteSet(b.dataset.del); haptic("ok"); renderLog(); });
+      }));
     // flash + reveal the set that was just added
     if (lastAddedId) {
       const el = box.querySelector(`.set-line[data-set="${lastAddedId}"]`);
