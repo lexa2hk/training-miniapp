@@ -277,26 +277,32 @@
       for (const ex of exOrder) {
         inner += `<div class="ex-name">${esc(ex)}</div>`;
         const list = byEx.get(ex).sort((a, b) => a.setNo - b.setNo);
-        // collapse consecutive sets with identical weight × reps into one row
-        const runs = [];
+        // group all sets with identical weight × reps (ordered by first occurrence)
+        const groups = new Map();
+        const order = [];
         for (const s of list) {
-          const prev = runs[runs.length - 1];
-          if (prev && prev.weight === s.weight && prev.reps === s.reps) prev.items.push(s);
-          else runs.push({ weight: s.weight, reps: s.reps, items: [s] });
+          const key = s.weight + "|" + s.reps;
+          if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+          groups.get(key).push(s);
         }
-        for (const run of runs) {
-          const n = run.items.length;
-          const isPR = run.items.some((s) => flags.has(s.id));
-          const notes = [...new Set(run.items.map((s) => s.notes).filter(Boolean))].join("; ");
-          const totalVol = run.weight * run.reps * n;
-          const lastId = run.items[n - 1].id;                 // tapping ✕ peels the last set
-          const badge = n > 1 ? `${n}×` : String(run.items[0].setNo);
+        for (const key of order) {
+          const items = groups.get(key);
+          const n = items.length;
+          const weight = items[0].weight, reps = items[0].reps;
+          const isPR = items.some((s) => flags.has(s.id));
+          const notes = [...new Set(items.map((s) => s.notes).filter(Boolean))].join("; ");
+          const totalVol = weight * reps * n;
+          const lastId = items.reduce((a, b) => (a.setNo >= b.setNo ? a : b)).id; // peel/highlight anchor = newest set
+          const badge = n > 1 ? `${n}×` : String(items[0].setNo);
           inner += `<div class="set-line" data-set="${lastId}">
             <span class="no">${badge}</span>
-            <span class="wr"><b>${fmtNum(run.weight)}</b> кг × <b>${run.reps}</b>${isPR ? ' <span class="pr">🏆</span>' : ""}
+            <span class="wr"><b>${fmtNum(weight)}</b> кг × <b>${reps}</b>${isPR ? ' <span class="pr">🏆</span>' : ""}
               ${notes ? `<span class="note">${esc(notes)}</span>` : ""}</span>
-            <span class="vol">${fmtNum(totalVol)} кг<br>1ПМ ${fmtNum(oneRM(run.weight, run.reps))}</span>
-            <button class="del" data-del="${lastId}" data-count="${n}">✕</button>
+            <span class="vol">${fmtNum(totalVol)} кг<br>1ПМ ${fmtNum(oneRM(weight, reps))}</span>
+            <span class="row-actions">
+              <button class="rowbtn minus" data-dec="${lastId}" data-count="${n}" aria-label="Убрать подход">−</button>
+              <button class="rowbtn plus" data-inc data-date="${date}" data-wt="${esc(wt)}" data-ex="${esc(ex)}" data-w="${weight}" data-r="${reps}" aria-label="Добавить такой же подход">＋</button>
+            </span>
           </div>`;
         }
       }
@@ -307,11 +313,24 @@
       </div>`;
     }
     box.innerHTML = html;
-    box.querySelectorAll("[data-del]").forEach((b) =>
+    // − : remove one set from the group (confirm only when it's the last one)
+    box.querySelectorAll("[data-dec]").forEach((b) =>
       b.addEventListener("click", () => {
         const cnt = parseInt(b.dataset.count || "1", 10);
-        if (cnt > 1) { Store.deleteSet(b.dataset.del); haptic("ok"); renderLog(); } // peel one from the group
-        else confirmThen("Удалить этот подход?", () => { Store.deleteSet(b.dataset.del); haptic("ok"); renderLog(); });
+        if (cnt > 1) { Store.deleteSet(b.dataset.dec); haptic("ok"); renderLog(); }
+        else confirmThen("Удалить этот подход?", () => { Store.deleteSet(b.dataset.dec); haptic("ok"); renderLog(); });
+      }));
+    // ＋ : add one more identical set to the group
+    box.querySelectorAll("[data-inc]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const date = b.dataset.date, ex = b.dataset.ex, wt = b.dataset.wt;
+        const w = parseFloat(b.dataset.w), r = parseInt(b.dataset.r, 10);
+        const same = Store.sets().filter((s) => s.date === date && s.exercise === ex);
+        const setNo = same.length ? Math.max(...same.map((s) => s.setNo)) + 1 : 1;
+        const set = Store.addSet({ date, workout: wt, exercise: ex, setNo, weight: w, reps: r, notes: "" });
+        lastAddedId = set.id;
+        haptic("ok");
+        renderLog();
       }));
     // flash + reveal the set that was just added
     if (lastAddedId) {
@@ -479,7 +498,10 @@
         <h2 style="margin-top:0">Экспорт / Импорт</h2>
         <div class="btn-row">
           <button class="btn secondary small" id="s-export">Копировать JSON</button>
-          <button class="btn secondary small" id="s-import-toggle">Импорт</button>
+          <button class="btn secondary small" id="s-download">Скачать .json</button>
+        </div>
+        <div class="btn-row">
+          <button class="btn secondary small" id="s-import-toggle">Импорт из JSON</button>
         </div>
         <div id="import-box" style="display:none;margin-top:10px">
           <textarea id="s-import-text" placeholder="Вставь JSON, экспортированный ранее"></textarea>
@@ -508,6 +530,23 @@
         console.log(txt); toast("Смотри консоль (clipboard недоступен)");
       }
       haptic("ok");
+    });
+    document.getElementById("s-download").addEventListener("click", () => {
+      const txt = Store.exportJSON();
+      try {
+        const blob = new Blob([txt], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `trenirovki-${todayISO()}.json`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+        toast("Файл сохранён");
+        haptic("ok");
+      } catch (e) {
+        console.error(e); toast("Не удалось скачать файл"); haptic("err");
+      }
     });
     document.getElementById("s-import-toggle").addEventListener("click", () => {
       const b = document.getElementById("import-box"); b.style.display = b.style.display === "none" ? "block" : "none";
