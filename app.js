@@ -119,6 +119,7 @@
 
   // ---------- LOG view ----------
   const form = { date: todayISO(), workout: "", exercise: "", weight: "", reps: "", notes: "", setNo: 1 };
+  let lastAddedId = null; // newly added set — highlighted + scrolled into view on next list render
 
   function nextSetNo() {
     const same = Store.sets().filter((s) => s.date === form.date && s.exercise === form.exercise);
@@ -226,18 +227,34 @@
     if (wl) wl.textContent = `Вес (кг) · подход №${form.setNo}`;
   }
 
-  async function addSet() {
+  function addSet() {
     const w = parseFloat(form.weight), r = parseFloat(form.reps);
     if (!form.exercise.trim()) { toast("Укажи упражнение"); haptic("err"); return; }
     if (!(w > 0) || !(r > 0)) { toast("Вес и повторы должны быть > 0"); haptic("err"); return; }
-    await Store.addSet({
+    const set = Store.addSet({
       date: form.date, workout: form.workout.trim(), exercise: form.exercise.trim(),
       setNo: nextSetNo(), weight: w, reps: r, notes: form.notes.trim(),
     });
+    lastAddedId = set.id;
     haptic("ok");
     toast("Подход добавлен");
-    form.notes = ""; // keep weight/reps/exercise for the next set
-    renderLog();
+    // keep weight/reps/exercise for the next set; clear only the note field
+    form.notes = "";
+    const notesEl = document.getElementById("f-notes");
+    if (notesEl) notesEl.value = "";
+    // bump the set-number label + refresh suggestions without rebuilding the form
+    form.setNo = nextSetNo();
+    const wl = [...view.querySelectorAll(".field label")].find((l) => l.textContent.startsWith("Вес"));
+    if (wl) wl.textContent = `Вес (кг) · подход №${form.setNo}`;
+    refreshDatalists();
+    renderLogList();
+  }
+
+  function refreshDatalists() {
+    const dlw = document.getElementById("dl-workout");
+    const dle = document.getElementById("dl-exercise");
+    if (dlw) dlw.innerHTML = Store.workouts().map((w) => `<option value="${esc(w)}">`).join("");
+    if (dle) dle.innerHTML = Store.exercises().map((e) => `<option value="${esc(e)}">`).join("");
   }
 
   function renderLogList() {
@@ -260,7 +277,7 @@
       for (const ex of exOrder) {
         inner += `<div class="ex-name">${esc(ex)}</div>`;
         for (const s of byEx.get(ex).sort((a, b) => a.setNo - b.setNo)) {
-          inner += `<div class="set-line">
+          inner += `<div class="set-line" data-set="${s.id}">
             <span class="no">${s.setNo}</span>
             <span class="wr"><b>${fmtNum(s.weight)}</b> кг × <b>${s.reps}</b>${flags.has(s.id) ? ' <span class="pr">🏆</span>' : ""}
               ${s.notes ? `<span class="note">${esc(s.notes)}</span>` : ""}</span>
@@ -277,11 +294,14 @@
     }
     box.innerHTML = html;
     box.querySelectorAll("[data-del]").forEach((b) =>
-      b.addEventListener("click", async () => {
-        if (tg && tg.showConfirm) {
-          tg.showConfirm("Удалить этот подход?", async (ok) => { if (ok) { await Store.deleteSet(b.dataset.del); haptic("ok"); renderLog(); } });
-        } else if (confirm("Удалить этот подход?")) { await Store.deleteSet(b.dataset.del); renderLog(); }
-      }));
+      b.addEventListener("click", () =>
+        confirmThen("Удалить этот подход?", () => { Store.deleteSet(b.dataset.del); haptic("ok"); renderLog(); })));
+    // flash + reveal the set that was just added
+    if (lastAddedId) {
+      const el = box.querySelector(`.set-line[data-set="${lastAddedId}"]`);
+      if (el) { el.classList.add("just-added"); try { el.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (_) {} }
+      lastAddedId = null;
+    }
   }
 
   // ---------- PROGRESS view ----------
@@ -475,18 +495,18 @@
     document.getElementById("s-import-toggle").addEventListener("click", () => {
       const b = document.getElementById("import-box"); b.style.display = b.style.display === "none" ? "block" : "none";
     });
-    const doImport = async (merge) => {
+    const doImport = (merge) => {
       const text = document.getElementById("s-import-text").value.trim();
       if (!text) { toast("Вставь JSON"); return; }
-      try { await Store.importJSON(text, { merge }); toast(merge ? "Данные добавлены" : "Данные заменены"); haptic("ok"); renderSettings(); }
+      try { Store.importJSON(text, { merge }); toast(merge ? "Данные добавлены" : "Данные заменены"); haptic("ok"); renderSettings(); }
       catch (e) { toast("Ошибка: неверный JSON"); haptic("err"); }
     };
     document.getElementById("s-import-merge").addEventListener("click", () => doImport(true));
     document.getElementById("s-import-replace").addEventListener("click", () => confirmThen("Заменить все данные импортом?", () => doImport(false)));
     document.getElementById("s-reseed").addEventListener("click", () =>
-      confirmThen("Перезагрузить исходные данные из журнала? Текущие записи будут заменены.", async () => { await Store.reseed(); toast("Готово"); haptic("ok"); switchTab("log"); }));
+      confirmThen("Перезагрузить исходные данные из журнала? Текущие записи будут заменены.", () => { Store.reseed(); toast("Готово"); haptic("ok"); switchTab("log"); }));
     document.getElementById("s-wipe").addEventListener("click", () =>
-      confirmThen("Удалить ВСЕ записи без возможности восстановления?", async () => { await Store.wipe(); toast("Очищено"); haptic("ok"); switchTab("log"); }));
+      confirmThen("Удалить ВСЕ записи без возможности восстановления?", () => { Store.wipe(); toast("Очищено"); haptic("ok"); switchTab("log"); }));
   }
 
   function confirmThen(msg, fn) {

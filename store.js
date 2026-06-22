@@ -99,15 +99,42 @@
       return this.data;
     },
 
-    async save() {
-      try {
-        if (this.backend === "cloud") await cloudSave(this.data);
-        else lsSave(this.data);
-      } catch (e) {
-        console.error("save error", e);
-        // last-ditch: keep a local copy
-        try { lsSave(this.data); } catch (_) {}
-        throw e;
+    // Persistence is fire-and-forget so the UI never waits on (or breaks from) a
+    // slow/failing CloudStorage write. Mutations update memory synchronously and
+    // schedule a background save; only one save runs at a time, with a trailing
+    // pass if more changes arrived while it was in flight.
+    _saving: false,
+    _dirty: false,
+    _flushPromise: null,
+
+    save() {
+      this._dirty = true;
+      this._drain();
+      return this._flushPromise || Promise.resolve();
+    },
+
+    _drain() {
+      if (this._saving || !this._dirty) return;
+      this._saving = true;
+      this._dirty = false;
+      this._flushPromise = (async () => {
+        try {
+          if (this.backend === "cloud") await cloudSave(this.data);
+          else lsSave(this.data);
+        } catch (e) {
+          console.error("save error", e);
+          try { lsSave(this.data); this.backend = "local"; } catch (_) {}
+        } finally {
+          this._saving = false;
+          if (this._dirty) this._drain();
+        }
+      })();
+    },
+
+    async flush() {
+      while (this._dirty || this._saving) {
+        this._drain();
+        try { await this._flushPromise; } catch (_) {}
       }
     },
 
@@ -115,40 +142,40 @@
     workouts() { return this.data.workouts; },
     exercises() { return this.data.exercises; },
 
-    async addSet(s) {
+    addSet(s) {
       const set = withId(s);
       this.data.sets.push(set);
       if (set.workout && !this.data.workouts.includes(set.workout)) this.data.workouts.push(set.workout);
       if (set.exercise && !this.data.exercises.includes(set.exercise)) this.data.exercises.push(set.exercise);
-      await this.save();
+      this.save();
       return set;
     },
 
-    async updateSet(id, patch) {
+    updateSet(id, patch) {
       const s = this.data.sets.find((x) => x.id === id);
       if (!s) return null;
       Object.assign(s, patch);
-      await this.save();
+      this.save();
       return s;
     },
 
-    async deleteSet(id) {
+    deleteSet(id) {
       this.data.sets = this.data.sets.filter((x) => x.id !== id);
-      await this.save();
+      this.save();
     },
 
-    async addWorkoutType(name) {
+    addWorkoutType(name) {
       name = (name || "").trim();
-      if (name && !this.data.workouts.includes(name)) { this.data.workouts.push(name); await this.save(); }
+      if (name && !this.data.workouts.includes(name)) { this.data.workouts.push(name); this.save(); }
     },
-    async addExercise(name) {
+    addExercise(name) {
       name = (name || "").trim();
-      if (name && !this.data.exercises.includes(name)) { this.data.exercises.push(name); await this.save(); }
+      if (name && !this.data.exercises.includes(name)) { this.data.exercises.push(name); this.save(); }
     },
 
     exportJSON() { return JSON.stringify(this.data, null, 2); },
 
-    async importJSON(text, { merge } = {}) {
+    importJSON(text, { merge } = {}) {
       const incoming = normalize(JSON.parse(text));
       if (merge) {
         const seen = new Set(this.data.sets.map(setKey));
@@ -161,22 +188,22 @@
       } else {
         this.data = { ...incoming, sets: incoming.sets.map(withId) };
       }
-      await this.save();
+      this.save();
     },
 
-    async reseed() {
+    reseed() {
       const seed = window.__WT_SEED__ || { sets: [], workouts: [], exercises: [] };
       this.data = normalize({
         sets: (seed.sets || []).map(withId),
         workouts: seed.workouts || [],
         exercises: seed.exercises || [],
       });
-      await this.save();
+      this.save();
     },
 
-    async wipe() {
+    wipe() {
       this.data = { sets: [], workouts: window.__WT_SEED__?.workouts || [], exercises: window.__WT_SEED__?.exercises || [] };
-      await this.save();
+      this.save();
     },
   };
 
